@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Audio BLE LED Controller</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f7f8fb;
+      color: #222;
+      margin: 0;
+      padding: 24px;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 28px;
+    }
+
+    h2 {
+      margin-top: 28px;
+      font-size: 20px;
+    }
+
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 15px;
+      cursor: pointer;
+      margin: 6px 8px 6px 0;
+      background: #111827;
+      color: white;
+    }
+
+    button.secondary {
+      background: #4b5563;
+    }
+
+    button.mode {
+      background: #2563eb;
+    }
+
+    button.off {
+      background: #dc2626;
+    }
+
+    input[type="file"] {
+      margin-top: 8px;
+      margin-bottom: 12px;
+    }
+
+    audio {
+      width: 100%;
+      margin-top: 8px;
+    }
+
+    .status-box {
+      margin-top: 16px;
+      padding: 16px;
+      background: #f3f4f6;
+      border-radius: 12px;
+    }
+
+    .label {
+      font-weight: 700;
+    }
+
+    .meter {
+      width: 100%;
+      height: 18px;
+      background: #d1d5db;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+
+    .bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #60a5fa, #22c55e, #f59e0b, #ef4444);
+      transition: width 0.05s linear;
+    }
+
+    .slider-wrap {
+      margin-top: 12px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+    }
+
+    .small {
+      color: #6b7280;
+      font-size: 13px;
+    }
+
+    .row {
+      margin-top: 10px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #e5e7eb;
+      font-size: 13px;
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Audio BLE LED Controller</h1>
+    <div class="small">
+      AndroidのChrome系ブラウザで使うのがおすすめです。
+    </div>
+
+    <h2>1. BLE接続</h2>
+    <button id="connectBtn">BLE接続</button>
+    <button id="disconnectBtn" class="secondary">切断表示に戻す</button>
+
+    <div class="status-box">
+      <div><span class="label">BLE状態:</span> <span id="bleStatus">未接続</span></div>
+      <div><span class="label">現在モード:</span> <span id="modeText">消灯</span></div>
+    </div>
+
+    <h2>2. 音声ファイル</h2>
+    <input id="fileInput" type="file" accept="audio/*">
+    <audio id="audio" controls></audio>
+
+    <div class="status-box">
+      <div><span class="label">送信レベル:</span> <span id="levelText">0</span></div>
+      <div class="meter"><div class="bar" id="bar"></div></div>
+      <div class="small">音量連動モード中のみ、再生音量に合わせて送信します。</div>
+    </div>
+
+    <h2>3. モード切替</h2>
+    <div class="row">
+      <button id="audioModeBtn" class="mode">音量連動モード</button>
+      <button id="steadyModeBtn" class="mode">常時点灯モード</button>
+      <button id="chaseModeBtn" class="mode">流れるモード</button>
+      <button id="offBtn" class="off">消灯</button>
+    </div>
+
+    <div class="slider-wrap">
+      <div>
+        <span class="label">固定明るさ:</span>
+        <span id="steadyValueText">180</span>
+        <span class="pill">常時点灯 / 流れるモード用</span>
+      </div>
+      <input id="steadySlider" type="range" min="0" max="255" value="180">
+    </div>
+
+    <h2>使い方</h2>
+    <div class="small">
+      1. BLE接続ボタンを押す<br>
+      2. M5Stack-AudioLED を選ぶ<br>
+      3. 音声ファイルを選ぶ<br>
+      4. モードを選ぶ<br>
+      5. 音量連動モードなら再生するとLEDが反応します
+    </div>
+  </div>
+
+  <script>
+    const SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
+    const CHAR_UUID    = "abcd1234-5678-90ab-cdef-1234567890ab";
+
+    // mode
+    // 0 = off
+    // 1 = audio reactive
+    // 2 = steady aqua
+    // 3 = chase
+
+    let characteristic = null;
+    let bleDevice = null;
+
+    let audioContext = null;
+    let analyser = null;
+    let sourceNode = null;
+    let dataArray = null;
+    let sendTimer = null;
+
+    let currentMode = 0;
+    let steadyValue = 180;
+
+    const connectBtn = document.getElementById("connectBtn");
+    const disconnectBtn = document.getElementById("disconnectBtn");
+    const bleStatus = document.getElementById("bleStatus");
+
+    const fileInput = document.getElementById("fileInput");
+    const audio = document.getElementById("audio");
+
+    const audioModeBtn = document.getElementById("audioModeBtn");
+    const steadyModeBtn = document.getElementById("steadyModeBtn");
+    const chaseModeBtn = document.getElementById("chaseModeBtn");
+    const offBtn = document.getElementById("offBtn");
+
+    const steadySlider = document.getElementById("steadySlider");
+    const steadyValueText = document.getElementById("steadyValueText");
+
+    const modeText = document.getElementById("modeText");
+    const levelText = document.getElementById("levelText");
+    const bar = document.getElementById("bar");
+
+    function updateModeText() {
+      if (currentMode === 0) modeText.textContent = "消灯";
+      if (currentMode === 1) modeText.textContent = "音量連動";
+      if (currentMode === 2) modeText.textContent = "常時点灯（水色ベース）";
+      if (currentMode === 3) modeText.textContent = "流れるモード";
+    }
+
+    function updateLevelUI(level) {
+      levelText.textContent = level;
+      bar.style.width = `${(level / 255) * 100}%`;
+    }
+
+    async function sendPacket(mode, value) {
+      if (!characteristic) return;
+
+      try {
+        const packet = new Uint8Array([mode, value]);
+        await characteristic.writeValueWithoutResponse(packet);
+      } catch (e) {
+        console.error("BLE write error:", e);
+      }
+    }
+
+    connectBtn.addEventListener("click", async () => {
+      try {
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ name: "M5Stack-AudioLED" }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        bleDevice.addEventListener("gattserverdisconnected", () => {
+          bleStatus.textContent = "切断されました";
+          characteristic = null;
+        });
+
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        characteristic = await service.getCharacteristic(CHAR_UUID);
+
+        bleStatus.textContent = "接続済み";
+        await sendPacket(currentMode, (currentMode === 2 || currentMode === 3) ? steadyValue : 0);
+      } catch (e) {
+        console.error(e);
+        bleStatus.textContent = "接続失敗";
+        alert("BLE接続失敗: " + e.message);
+      }
+    });
+
+    disconnectBtn.addEventListener("click", () => {
+      if (bleDevice && bleDevice.gatt && bleDevice.gatt.connected) {
+        bleDevice.gatt.disconnect();
+      }
+      characteristic = null;
+      bleStatus.textContent = "未接続";
+    });
+
+    fileInput.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const url = URL.createObjectURL(file);
+      audio.src = url;
+
+      if (!audioContext) {
+        audioContext = new AudioContext();
+      }
+
+      if (sourceNode) {
+        try {
+          sourceNode.disconnect();
+        } catch (_) {}
+        sourceNode = null;
+      }
+
+      sourceNode = audioContext.createMediaElementSource(audio);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      sourceNode.connect(analyser);
+      analyser.connect(audioContext.destination);
+    });
+
+    audioModeBtn.addEventListener("click", async () => {
+      currentMode = 1;
+      updateModeText();
+      await sendPacket(1, 0);
+    });
+
+    steadyModeBtn.addEventListener("click", async () => {
+      currentMode = 2;
+      updateModeText();
+      updateLevelUI(steadyValue);
+      await sendPacket(2, steadyValue);
+    });
+
+    chaseModeBtn.addEventListener("click", async () => {
+      currentMode = 3;
+      updateModeText();
+      updateLevelUI(steadyValue);
+      await sendPacket(3, steadyValue);
+    });
+
+    offBtn.addEventListener("click", async () => {
+      currentMode = 0;
+      updateModeText();
+      updateLevelUI(0);
+      await sendPacket(0, 0);
+    });
+
+    steadySlider.addEventListener("input", async () => {
+      steadyValue = Number(steadySlider.value);
+      steadyValueText.textContent = steadyValue;
+
+      if (currentMode === 2 || currentMode === 3) {
+        updateLevelUI(steadyValue);
+        await sendPacket(currentMode, steadyValue);
+      }
+    });
+
+    audio.addEventListener("play", async () => {
+      if (audioContext && audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+
+      if (sendTimer) clearInterval(sendTimer);
+
+      sendTimer = setInterval(async () => {
+        if (!analyser) return;
+
+        analyser.getByteTimeDomainData(dataArray);
+
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const centered = dataArray[i] - 128;
+          sum += centered * centered;
+        }
+
+        const rms = Math.sqrt(sum / dataArray.length);
+        let level = Math.min(255, Math.floor(rms * 4));
+
+        if (currentMode === 1) {
+          updateLevelUI(level);
+          await sendPacket(1, level);
+        }
+      }, 50);
+    });
+
+    audio.addEventListener("pause", async () => {
+      if (sendTimer) clearInterval(sendTimer);
+
+      if (currentMode === 1) {
+        updateLevelUI(0);
+        await sendPacket(1, 0);
+      }
+    });
+
+    audio.addEventListener("ended", async () => {
+      if (sendTimer) clearInterval(sendTimer);
+
+      if (currentMode === 1) {
+        updateLevelUI(0);
+        await sendPacket(1, 0);
+      }
+    });
+
+    updateModeText();
+    updateLevelUI(0);
+  </script>
+</body>
+</html>
